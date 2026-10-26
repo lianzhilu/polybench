@@ -36,9 +36,13 @@ jobs:
         run: |
           for module in build/wasm/*.wasm; do
             echo "checking $module"
-            if wasm-dis "$module" -o - | grep -q '(import '; then
+            imports=$(wasm-dis "$module" -o - | grep '(import ' || true)
+            if [[ -n "$imports" ]]; then
               echo "unexpected import in $module" >&2
-              wasm-dis "$module" -o - | grep '(import ' >&2
+              echo "$imports" >&2
+              while IFS= read -r line; do
+                echo "::error file=$module::$line"
+              done <<< "$imports"
               exit 1
             fi
             wasm-dis "$module" -o - | grep -q '(export "benchmark_run"'
@@ -46,6 +50,7 @@ jobs:
           done
 
       - name: Preserve artifacts for inspection
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: polybench-reactors
