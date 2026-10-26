@@ -82,7 +82,7 @@
 */
 # ifndef POLYBENCH_STACK_ARRAYS
 #  define POLYBENCH_ARRAY(x) *x
-#  ifdef POLYBENCH_ENABLE_INTARRAY_PAD
+#  if defined(POLYBENCH_ENABLE_INTARRAY_PAD) || defined(POLYBENCH_WASM_REACTOR)
 #   define POLYBENCH_FREE_ARRAY(x) polybench_free_data((void*)x);
 #  else
 #   define POLYBENCH_FREE_ARRAY(x) free((void*)x);
@@ -155,13 +155,22 @@
 
 
 /* Dead-code elimination macros. Use argc/argv for the run-time check. */
-# ifndef POLYBENCH_DUMP_ARRAYS
+# ifdef POLYBENCH_WASM_REACTOR
+#  define POLYBENCH_DCE_ONLY_CODE
+# elif !defined(POLYBENCH_DUMP_ARRAYS)
 #  define POLYBENCH_DCE_ONLY_CODE    if (argc > 42 && ! strcmp(argv[0], ""))
 # else
 #  define POLYBENCH_DCE_ONLY_CODE
 # endif
 
-#define POLYBENCH_DUMP_TARGET stderr
+#ifdef POLYBENCH_WASM_REACTOR
+/* Consume live-out values without pulling stdio/WASI into a reactor build. */
+extern int polybench_reactor_fprintf(void*, const char*, ...);
+# define fprintf polybench_reactor_fprintf
+# define POLYBENCH_DUMP_TARGET ((void*)0)
+#else
+# define POLYBENCH_DUMP_TARGET stderr
+#endif
 #define POLYBENCH_DUMP_START    fprintf(POLYBENCH_DUMP_TARGET, "==BEGIN DUMP_ARRAYS==\n")
 #define POLYBENCH_DUMP_FINISH   fprintf(POLYBENCH_DUMP_TARGET, "==END   DUMP_ARRAYS==\n")
 #define POLYBENCH_DUMP_BEGIN(s) fprintf(POLYBENCH_DUMP_TARGET, "begin dump: %s", s)

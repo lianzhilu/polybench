@@ -1,0 +1,42 @@
+name: wasm reactor
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      - name: Test all benchmark adapters natively
+        run: ./wasm/test-native.sh
+
+      - name: Build floating-point and integer reactors
+        run: |
+          ./wasm/build.sh 2mm MINI
+          ./wasm/build.sh nussinov MINI
+
+      - name: Require import-free modules
+        run: |
+          for module in build/wasm/*.wasm; do
+            echo "checking $module"
+            if wasm-dis "$module" -o - | grep -q '(import '; then
+              echo "unexpected import in $module" >&2
+              wasm-dis "$module" -o - | grep '(import ' >&2
+              exit 1
+            fi
+            wasm-dis "$module" -o - | grep -q '(export "benchmark_run"'
+            wasm-dis "$module" -o - | grep -q '(export "benchmark_checksum"'
+          done
+
+      - name: Preserve artifacts for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: polybench-reactors
+          path: build/wasm/*.wasm

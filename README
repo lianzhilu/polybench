@@ -28,6 +28,12 @@ PolyBench is currently available in C and in Fortran:
 - See PolyBench/C 4.2.1 for the C version
 - See PolyBench/Fortran 1.0 for the Fortran version (based on PolyBench/C 3.2)
 
+WebAssembly reactor builds:
+- This repository contains an import-free Emscripten build path for wasm32
+  and wasm64. See wasm/README.md for build, validation, and runtime
+  instructions. The original PolyBench/C sources and native behavior remain
+  unchanged.
+
 Available benchmarks (PolyBench/C 4.2.1)
 
 Benchmark	Description
