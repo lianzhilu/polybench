@@ -3,7 +3,8 @@
 This directory adds a WebAssembly build path without changing the original
 PolyBench/C programs.  Each program is built as a reactor with two exports:
 
-- `benchmark_run() -> i32`: initialize, execute, checksum, and clean up once;
+- `benchmark_run() -> i32`: lazily initialize the reactor, execute, checksum,
+  and clean up once;
 - `benchmark_checksum() -> i64`: return an FNV-1a digest of live-out values.
 
 The modules intentionally import neither WASI nor Emscripten JavaScript APIs.
@@ -11,6 +12,10 @@ They can therefore be instantiated by a Core WebAssembly runtime with
 Memory64 support.  Timing is performed by the host.  A single CLI invocation
 includes allocation, initialization, checksum, and cleanup; use an embedding
 harness when measuring individual phases or repeated calls.
+
+`benchmark_run` calls the Emscripten constructors lazily on its first use. A
+host may still call `_initialize` itself before `benchmark_run`; Emscripten's
+generated constructor wrapper is idempotent.
 
 ## Build
 
