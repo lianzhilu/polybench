@@ -41,7 +41,7 @@ jobs:
               echo "unexpected import in $module" >&2
               echo "$imports" >&2
               while IFS= read -r line; do
-                echo "::error file=$module::$line"
+                echo "::error::$module: $line"
               done <<< "$imports"
               exit 1
             fi
