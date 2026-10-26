@@ -42,10 +42,7 @@ void polybench_checksum_reset(void)
   polybench_checksum_value = FNV_OFFSET;
 }
 
-#if defined(__wasm__)
-__attribute__((export_name("benchmark_checksum")))
-#endif
-uint64_t polybench_checksum(void)
+uint64_t benchmark_checksum(void)
 {
   return polybench_checksum_value;
 }
