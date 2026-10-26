@@ -40,6 +40,8 @@ jobs:
             if [[ -n "$imports" ]]; then
               echo "unexpected import in $module" >&2
               echo "$imports" >&2
+              encoded_imports=$(printf '%s' "$imports" | base64 | tr -d '\n')
+              echo "::error::unexpected-imports-base64=$encoded_imports"
               {
                 echo "## Unexpected imports in $module"
                 echo '```wat'
