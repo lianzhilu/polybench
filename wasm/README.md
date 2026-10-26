@@ -58,13 +58,16 @@ wasmtime run --invoke benchmark_run build/wasm/2mm-wasm32.wasm
 wasmtime run -W memory64=y --invoke benchmark_run build/wasm/2mm-wasm64.wasm
 ```
 
-Wasmer (backend support varies; Emscripten wasm64 may require LLVM or V8):
+Wasmer (wasm32):
 
 ```sh
 wasmer run --invoke benchmark_run build/wasm/2mm-wasm32.wasm
-wasmer run --enable-memory64 --llvm --invoke benchmark_run \
-  build/wasm/2mm-wasm64.wasm
 ```
+
+Wasmer 7.5.0 successfully runs the wasm32 reactor, but its Cranelift, LLVM,
+and V8 backends reject the Emscripten wasm64 reactor as requiring unsupported
+features. Use Wasmtime 50 or newer for these wasm64 artifacts until Wasmer's
+backend support catches up.
 
 `benchmark_checksum` is intended for an embedding harness that keeps an
 instance alive and reads the digest after `benchmark_run`. The Wasmtime and
