@@ -19,8 +19,18 @@ jobs:
 
       - name: Build floating-point and integer reactors
         run: |
-          ./wasm/build.sh 2mm MINI
-          ./wasm/build.sh nussinov MINI
+          build_log=$(mktemp)
+          if ! ./wasm/build.sh 2mm MINI >"$build_log" 2>&1; then
+            cat "$build_log"
+            while IFS= read -r line; do echo "::error::$line"; done < "$build_log"
+            exit 1
+          fi
+          if ! ./wasm/build.sh nussinov MINI >"$build_log" 2>&1; then
+            cat "$build_log"
+            while IFS= read -r line; do echo "::error::$line"; done < "$build_log"
+            exit 1
+          fi
+          cat "$build_log"
 
       - name: Require import-free modules
         run: |
