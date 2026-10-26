@@ -24,6 +24,16 @@
 
 static volatile uint64_t polybench_checksum_value = FNV_OFFSET;
 
+/* Keep allocator/assertion failure paths inside Core Wasm.  Emscripten's
+ * standalone libc abort path may otherwise retain a WASI proc_exit/fd_write
+ * import even though successful benchmark executions never reach it. */
+__attribute__((noreturn))
+void abort(void)
+{
+  __builtin_trap();
+  __builtin_unreachable();
+}
+
 static void checksum_u64(uint64_t value)
 {
   unsigned int i;
