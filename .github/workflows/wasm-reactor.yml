@@ -40,6 +40,12 @@ jobs:
             if [[ -n "$imports" ]]; then
               echo "unexpected import in $module" >&2
               echo "$imports" >&2
+              {
+                echo "## Unexpected imports in $module"
+                echo '```wat'
+                echo "$imports"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
               while IFS= read -r line; do
                 echo "::error::$module: $line"
               done <<< "$imports"
