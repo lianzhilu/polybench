@@ -12,7 +12,6 @@ jobs:
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: latest
-          actions-cache-folder: emsdk-cache
 
       - name: Test all benchmark adapters natively
         run: ./wasm/test-native.sh
