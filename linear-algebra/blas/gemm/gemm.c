@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "gemm.h"
 
+#ifdef GEMM_REMAIN_KERNEL
+#include <stdint.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -48,6 +52,7 @@ void init_array(int ni, int nj, int nk,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef GEMM_REMAIN_KERNEL
 static
 void print_array(int ni, int nj,
 		 DATA_TYPE POLYBENCH_2D(C,NI,NJ,ni,nj))
@@ -64,6 +69,7 @@ void print_array(int ni, int nj,
   POLYBENCH_DUMP_END("C");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -98,6 +104,77 @@ void kernel_gemm(int ni, int nj, int nk,
 
 }
 
+
+#ifdef GEMM_REMAIN_KERNEL
+
+/* Keep the original kernel and initialization, but let the host own timing and
+   output. These pointers use the same row layout and 4096-byte alignment as the
+   default PolyBench heap allocation. */
+static DATA_TYPE (*gemm_c)[NJ + POLYBENCH_PADDING_FACTOR];
+static DATA_TYPE (*gemm_a)[NK + POLYBENCH_PADDING_FACTOR];
+static DATA_TYPE (*gemm_b)[NJ + POLYBENCH_PADDING_FACTOR];
+static DATA_TYPE gemm_alpha, gemm_beta;
+
+static void* gemm_alloc(size_t bytes)
+{
+  void* ptr = NULL;
+  if (posix_memalign(&ptr, 4096, bytes) != 0 || ptr == NULL)
+    __builtin_trap();
+  return ptr;
+}
+
+/* Call before EVERY measurement: C is an input as well as an output. */
+void gemm_init(void)
+{
+  if (gemm_c == NULL) {
+    gemm_c = gemm_alloc(sizeof(DATA_TYPE[NI + POLYBENCH_PADDING_FACTOR]
+                                     [NJ + POLYBENCH_PADDING_FACTOR]));
+    gemm_a = gemm_alloc(sizeof(DATA_TYPE[NI + POLYBENCH_PADDING_FACTOR]
+                                     [NK + POLYBENCH_PADDING_FACTOR]));
+    gemm_b = gemm_alloc(sizeof(DATA_TYPE[NK + POLYBENCH_PADDING_FACTOR]
+                                     [NJ + POLYBENCH_PADDING_FACTOR]));
+  }
+  init_array(NI, NJ, NK, &gemm_alpha, &gemm_beta, gemm_c, gemm_a, gemm_b);
+}
+
+void gemm_run(void)
+{
+  if (gemm_c == NULL)
+    __builtin_trap();
+  kernel_gemm(NI, NJ, NK, gemm_alpha, gemm_beta, gemm_c, gemm_a, gemm_b);
+}
+
+/* All live-out elements remain observable under -O3; no stdio is needed. */
+double gemm_checksum(void)
+{
+  double sum = 0.0;
+  if (gemm_c == NULL)
+    __builtin_trap();
+  for (int i = 0; i < NI; i++)
+    for (int j = 0; j < NJ; j++)
+      sum += gemm_c[i][j];
+  return sum;
+}
+
+/* Explicit i64 in BOTH builds, rather than a width-dependent pointer ABI. */
+uint64_t gemm_c_offset(void) { return (uint64_t)(uintptr_t)gemm_c; }
+int gemm_ni(void) { return NI; }
+int gemm_nj(void) { return NJ; }
+int gemm_nk(void) { return NK; }
+int gemm_row_stride(void) { return NJ + POLYBENCH_PADDING_FACTOR; }
+int gemm_pointer_bits(void) { return (int)(8 * sizeof(void*)); }
+
+void gemm_free(void)
+{
+  free(gemm_c);
+  free(gemm_a);
+  free(gemm_b);
+  gemm_c = NULL;
+  gemm_a = NULL;
+  gemm_b = NULL;
+}
+
+#else
 
 int main(int argc, char** argv)
 {
@@ -144,3 +221,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* GEMM_REMAIN_KERNEL */
