@@ -9,7 +9,10 @@
  */
 /* 2mm.c: this file is part of PolyBench/C */
 
-#include <stdio.h>
+#ifndef WASM64_NO_STDIO
+# include <stdio.h>
+#endif
+#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
@@ -19,6 +22,50 @@
 
 /* Include benchmark-specific header. */
 #include "2mm.h"
+
+#ifdef WASM64_NO_STDIO
+/*
+ * WASI Preview 1 uses wasm32 pointers in its host ABI.  Emscripten's
+ * standalone wasm64 output, on the other hand, gives pointer parameters an
+ * i64 type.  Keep this benchmark self-contained in no-stdio builds so that
+ * the linker does not retain pointer-bearing WASI imports from argv handling,
+ * stdio, timing, or PolyBench's diagnostic allocation path.
+ */
+static volatile DATA_TYPE polybench_2mm_result;
+
+static void*
+polybench_2mm_alloc_data(unsigned long long int n, int elt_size)
+{
+  size_t size = (size_t)n * (size_t)elt_size;
+  void* result = NULL;
+  int error = posix_memalign(&result, 4096, size);
+
+  if (error != 0 || result == NULL)
+    __builtin_trap();
+  return result;
+}
+
+# ifndef POLYBENCH_STACK_ARRAYS
+#  undef POLYBENCH_ALLOC_2D_ARRAY
+#  define POLYBENCH_ALLOC_2D_ARRAY(n1, n2, type)                 \
+  (type(*)[n1 + POLYBENCH_PADDING_FACTOR]                       \
+          [n2 + POLYBENCH_PADDING_FACTOR])                      \
+    polybench_2mm_alloc_data(                                   \
+      (n1 + POLYBENCH_PADDING_FACTOR) *                         \
+      (n2 + POLYBENCH_PADDING_FACTOR), sizeof(type))
+#  undef POLYBENCH_FREE_ARRAY
+#  define POLYBENCH_FREE_ARRAY(x) free((void*)x);
+# endif
+
+/* Instrumentation uses clock and output WASI calls, so timing is performed by
+ * the host for this mode. */
+# undef polybench_start_instruments
+# undef polybench_stop_instruments
+# undef polybench_print_instruments
+# define polybench_start_instruments
+# define polybench_stop_instruments
+# define polybench_print_instruments
+#endif
 
 
 /* Array initialization. */
@@ -52,6 +99,20 @@ void init_array(int ni, int nj, int nk, int nl,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifdef WASM64_NO_STDIO
+static
+void consume_array(int ni, int nl,
+                   DATA_TYPE POLYBENCH_2D(D,NI,NL,ni,nl))
+{
+  int i, j;
+  DATA_TYPE result = SCALAR_VAL(0.0);
+
+  for (i = 0; i < ni; i++)
+    for (j = 0; j < nl; j++)
+      result += D[i][j];
+  polybench_2mm_result = result;
+}
+#else
 static
 void print_array(int ni, int nl,
 		 DATA_TYPE POLYBENCH_2D(D,NI,NL,ni,nl))
@@ -68,6 +129,7 @@ void print_array(int ni, int nl,
   POLYBENCH_DUMP_END("D");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -105,7 +167,11 @@ void kernel_2mm(int ni, int nj, int nk, int nl,
 }
 
 
+#ifdef WASM64_NO_STDIO
+int main(void)
+#else
 int main(int argc, char** argv)
+#endif
 {
   /* Retrieve problem size. */
   int ni = NI;
@@ -147,7 +213,11 @@ int main(int argc, char** argv)
 
   /* Prevent dead-code elimination. All live-out data must be printed
      by the function call in argument. */
+#ifdef WASM64_NO_STDIO
+  consume_array(ni, nl, POLYBENCH_ARRAY(D));
+#else
   polybench_prevent_dce(print_array(ni, nl,  POLYBENCH_ARRAY(D)));
+#endif
 
   /* Be clean. */
   POLYBENCH_FREE_ARRAY(tmp);
