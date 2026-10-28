@@ -1,7 +1,7 @@
 # nussinov：wasm32 / wasm64 实验
 
 `nussinov.c` 新增 `POLYBENCH_REMAIN_KERNEL` 模式，保留原 `init_array`、计算内核和默认数据类型。
-不定义此宏时，原来的 PolyBench 命令行程序保持可用。GEMM 使用独立的既有接口；本程序使用公共 ABI v1。
+不定义此宏时，原来的 PolyBench 命令行程序保持可用。本程序使用公共 ABI v1。
 
 - 默认数据类型：**int / int32**，两种位宽使用相同类型。
 - 输出顺序：`table`。
