@@ -209,11 +209,23 @@ def snapshot(bench, descriptors):
 class WasmBenchmark:
     little_endian = True
 
-    def __init__(self, engine, path, bits):
+    def __init__(self, engine, path, bits, emit_code_dir=None):
         module = wasmtime.Module.from_file(engine, str(path))
         if module.imports:
             raise ValueError(f"{path}: unexpected imports " +
                              str([(i.module, i.name) for i in module.imports]))
+        self.code_artifact = None
+        if emit_code_dir is not None:
+            # Serialize the exact Module that is instantiated below, outside timing.
+            directory = emit_code_dir / path.name.removesuffix(f"-remain-kernel-wasm{bits}.wasm") / f"wasm{bits}"
+            directory.mkdir(parents=True, exist_ok=True)
+            compiled = bytes(module.serialize())
+            target = directory / "module.cwasm"
+            with target.open("xb") as output:  # never silently overwrite an experiment
+                output.write(compiled)
+            self.code_artifact = {"path": str(target.resolve()),
+                                  "sha256": hashlib.sha256(compiled).hexdigest(),
+                                  "bytes": len(compiled)}
         self.store = wasmtime.Store(engine)
         self.instance = wasmtime.Instance(self.store, module, [])
         self.exports = self.instance.exports(self.store)
@@ -351,7 +363,7 @@ def run_benchmark(name, engine, args):
             counters = PerfCounters(args.events)
         for bits in args.bits:
             path = args.build_dir / f"{name}-remain-kernel-wasm{bits}.wasm"
-            benches[bits] = WasmBenchmark(engine, path, bits)
+            benches[bits] = WasmBenchmark(engine, path, bits, args.emit_code_dir)
         baselines, descriptors, sums = {}, {}, {}
         for bits, bench in benches.items():
             bench.init()
@@ -442,6 +454,7 @@ def run_benchmark(name, engine, args):
         return {"benchmark": name, "status": status, "native_reference": native is not None,
                 "cross_mode_validation": cross_mode, "profile": args.profile,
                 "counter_summary": hardware,
+                "code_artifacts": {bits: bench.code_artifact for bits, bench in benches.items()},
                 "native_sha256": native.sha256 if native else None,
                 "descriptors": desc, "nonfinite_elements": nonfinite,
                 "module_sha256": {bits: bench.sha256 for bits, bench in benches.items()},
@@ -480,6 +493,10 @@ def main():
                         help="optional Linux x86_64 thread-local hardware counters")
     parser.add_argument("--events", help="comma-separated counters: " + ",".join(PERF_EVENTS))
     parser.add_argument("--cpu", type=int, help="bind to one allowed Linux logical CPU before engine creation")
+    parser.add_argument("--emit-code-dir", type=Path,
+                        help="save the executed compiled Module as DIR/name/wasmBITS/module.cwasm; refuses overwrite")
+    parser.add_argument("--jit-profile", choices=("none", "jitdump"), default="none",
+                        help="JIT code mapping for external perf; independent of hardware counters")
     parser.add_argument("--rtol", type=float)
     parser.add_argument("--atol", type=float)
     parser.add_argument("--allow-nonfinite", action="store_true",
@@ -513,6 +530,7 @@ def main():
     config.wasm_memory64 = True
     config.strategy = "cranelift"
     config.cranelift_opt_level = "speed"
+    config.profiler = args.jit_profile
     engine = wasmtime.Engine(config)
     report = {"wasmtime_python_version": version("wasmtime"),
               "python_version": platform.python_version(), "system": platform.system(),
@@ -527,10 +545,11 @@ def main():
                                       "Wasmtime, clock and counter-control boundary overhead"
                                       if args.profile == "counters" else None),
                             "multiplex_policy": "reject; no scaling",
-                            "timing_with_profiling": args.profile != "none"},
+                            "timing_with_profiling": args.profile != "none" or args.jit_profile != "none"},
               "rtol_override": args.rtol, "atol_override": args.atol,
               "allow_nonfinite": args.allow_nonfinite,
-              "runtime": {"memory64_enabled_for_both": True, "compiler": "cranelift", "opt_level": "speed"},
+              "runtime": {"memory64_enabled_for_both": True, "compiler": "cranelift", "opt_level": "speed",
+                          "jit_profile": args.jit_profile},
               "cache_policy": "reset all arrays before timing; no explicit cache flush",
               "timed_region": "one Python/Wasmtime call to the original kernel, includes call overhead",
               "results": []}

@@ -81,6 +81,8 @@ Python 包内置自己的 Wasmtime 引擎，不调用系统的 CLI。脚本要�
 | `--profile` | `none`；`counters` 在 Linux x86_64 上采集内核调用区间的硬件计数器 |
 | `--events` | profiling 时默认 `cycles,instructions,branches,branch-misses`；逗号分隔的非重复子集 |
 | `--cpu` | 可选，绑定到当前允许的某个 Linux 逻辑 CPU，绑定发生在 Engine 创建前 |
+| `--emit-code-dir` | 可选，导出实际执行的编译后模块到 `目录/程序/wasm位宽/module.cwasm`；拒绝覆盖 |
+| `--jit-profile` | `none`；`jitdump` 为外部 perf 导出 JIT 地址与机器码映射，独立于 `--profile` |
 | `--rtol` / `--atol` | 显式覆盖浮点容差并记录；整数始终精确比较 |
 | `--allow-nonfinite` | 调查时允许对应 NaN/Inf，结果标记 `PASS_NONFINITE_ALLOWED`，不表示数值有效 |
 | `--json` | 保存环境、参数、校验状态、输出描述、二进制哈希、原始样本和统计 |
@@ -206,10 +208,152 @@ Linux 的 RESET 不清零累计计数时间，脚本按样本计算时间差。
 失败记录为 `FAIL`，最终退出码为 1，不能将失败项混入硬件分析。
 
 建议在目标机器多次独立运行并交替 32/64 顺序，另外记录实际频率、温度、CPU 型号和编译命令。
-此版本提供计数统计，不包含 `perf record` 热点采样、JIT 符号映射或缓存/TLB 事件。
+计数器模式不采集热点样本或缓存/TLB 事件；下面的独立采集流程提供 JIT 映射和热点报告。
 接口依据：[Linux perf_event_open 手册](https://man7.org/linux/man-pages/man2/perf_event_open.2.html)。
 
+## 完整汇编与通用热点采样
+
+`utilities/collect_wasmtime_profiles.py` 复用统一运行器，每个程序、每种位宽单独启动进程，
+保存完整机器码及分析材料。已有 Wasm 无需重新编译。应在产生性能数据的 Linux x86_64 机器上
+执行采样；在 macOS arm64 上导出的代码是 ARM64，不能用来解释 x86-64 实验。
+
+### 只导出完整汇编
+
+先激活之前的 Python 环境。从仓库根目录执行：
+
+```bash
+python utilities/collect_wasmtime_profiles.py \
+  --benchmark all --bits both --mode assembly \
+  --build-dir build --native-dir build \
+  --output-dir build/assembly-v1
+```
+
+此模式不需要 perf 或 PMU 权限，需要 GNU `objdump` 或兼容的 `llvm-objdump`，
+可用 `--objdump /path/to/llvm-objdump` 指定。默认每项每种位宽预热 5 次、执行 5 次用于校验。
+支持当前主机为 Linux/macOS 的 x86_64/arm64；产物必须与主机架构一致。
+不提供 `--native-dir` 时只有单个位宽的自洽性检查，完整汇编本身不是正确性证明。
+
+运行器调用 `module.serialize()` 保存随后用于实例化执行的同一个 Module。
+不是调用另外一个 Wasmtime CLI 重新编译；所有导出和反汇编操作都在内核计时区间外。
+批量脚本对完整 `.text` 使用 `objdump -D -z --section=.text`，x86-64 使用 Intel 语法。
+`full.asm` 包含未采样命中的冷代码和零字节区间；填充和嵌入数据也可能被解码成指令，
+分析时结合 `symbols.txt` 的函数范围，不把所有反汇编行直接当作实际执行的指令。
+完整范围是该模块生成的机器码，不包括 Python/Wasmtime 宿主库，也不是逐条动态执行轨迹。
+优化删除/内联的 C 函数不一定保留独立符号；无调试名字时可能显示 `wasm[0]::function[N]`。
+
+### 完整汇编加热点采样
+
+需要 Linux x86_64、可访问的 PMU、`perf` 和 `objdump`。Ubuntu 可安装匹配运行内核的工具：
+
+```bash
+sudo apt install linux-tools-common linux-tools-$(uname -r) binutils
+perf --version
+objdump --version
+```
+
+首先采一项确认链路，随后批量采集。输出目录必须不存在：
+
+```bash
+python utilities/collect_wasmtime_profiles.py \
+  --benchmark gemm --bits both --mode sample \
+  --build-dir build --native-dir build --cpu 2 \
+  --samples 1001 --output-dir build/gemm-profile-v1
+
+# 使用之前的完整结果 JSON 估算各内核所需次数。
+# 把 build/all-results-v2.json 替换为实验机上真实的结果文件路径。
+python utilities/collect_wasmtime_profiles.py \
+  --benchmark all --bits both --mode sample \
+  --build-dir build --native-dir build --cpu 2 \
+  --baseline-results build/all-results-v2.json \
+  --target-kernel-seconds 10 --max-samples 100000 \
+  --timeout 600 --output-dir build/all-profiles-v1
+```
+
+`--cpu 2` 必须是当前允许使用的逻辑核，保持其 SMT 兄弟线程空闲。每种位宽按 32、64 顺序单独
+采样；重复实验可用 `--bits 64` / `--bits 32` 分别执行并交替顺序。不要把采样下的耗时替换
+普通计时基线。若 PMU 权限不足，按上一节检查权限，脚本不修改系统安全设置。
+
+| 选项 | 批量采集脚本的行为 |
+| --- | --- |
+| `--benchmark` / `--bits` | 复用 30 项名称及 `all`，位宽默认 `both` |
+| `--mode` | 默认 `sample`；`assembly` 只执行校验和完整代码导出 |
+| `--output-dir` | 必填的新目录，已存在即拒绝，避免覆盖实验 |
+| `--samples` | 显式次数，至少 5；优先于基线估算，不受 `--max-samples` 限制 |
+| `--baseline-results` | 用每种位宽的中位耗时估算次数；要求该项 PASS 且 Wasm SHA-256 匹配 |
+| `--target-kernel-seconds` | 默认 10，估算累计正式内核调用时间；只在使用基线估算时生效 |
+| `--max-samples` | 默认 100000，仅限制估算次数；达到上限会提示并记录，目标时间可能不足 |
+| `--frequency` | 默认 997 Hz，perf 请求频率；实际可能被系统调整 |
+| `--timeout` | 每个外部命令默认最多 600 秒；超时终止其进程组并保留失败日志 |
+| `--warmups` | 默认 5，至少 1 |
+
+采样模式不提供基线也不指定次数时，默认 1001 次。基线估算使用
+`ceil(目标秒数 * 1000 / median_ms)`，下限 5；基线只是时间估计，并不保证相同 CPU 或运行环境。
+初始化、校验和编译会增加总耗时。manifest 同时记录目标、估计、实际计时区间累计耗时和任务总耗时。
+显式 `--samples` 或 assembly 模式不使用基线估算。
+
+实际流程为 `perf record -e cycles:u -F 997 -k mono` 启动运行器（`--profile none --jit-profile jitdump`），
+导出完整代码后执行 `perf inject --jit`、`perf report`、`perf annotate`。
+采样覆盖整个进程，包括初始化、JIT、校验、预热；不是正式 `bench_run()` 区间的精确采样。
+`report.txt` 列出全进程热点，`annotated.asm` 限定 JIT 生成的 ELF 文件，避免误读原生参考或 Python 的同名函数，
+但其中仍可能包含 JIT 初始化函数、checksum 和预热调用。进一步按 `bench_run` 或内联后的计算循环筛选。
+既有 counters 模式继续负责正式调用区间的硬件计数；批量采样不同时开启它。
+
+### 产物及失败处理
+
+```text
+all-profiles-v1/
+  manifest.json                 # 环境、工具版本、命令参数、基线哈希及所有任务状态
+  cpuinfo.txt                   # Linux CPU 信息
+  gemm/
+    wasm32/
+      module.cwasm              # 实际执行模块的序列化编译产物
+      full.asm                  # 完整 .text 反汇编，独立于热点样本
+      symbols.txt               # 符号表与函数范围
+      run-results.json          # 校验、计时、Wasm/编译产物哈希、Engine 配置、CPU affinity
+      job.json                  # 任务命令、返回码、耗时、文件清单、错误
+      command.log               # 命令及 stderr
+      run.log                   # 运行器 stdout
+      perf.data                 # 以下文件仅 sample 模式产生
+      perf.jit.data
+      inject.log
+      report.txt
+      annotated.asm
+      jit-*.dump
+      jitted-*.so
+    wasm64/
+      ...
+```
+
+保留整个输出目录和 JIT 文件，分析期间不要移动或删除；perf 数据可能包含绝对路径。
+单项失败会继续后续任务，manifest 每项更新，任何失败最终返回退出码 1。中断返回 130，
+当前任务状态保存在其 job.json。若采样后处理失败，但 `assembly_status` 为 PASS，
+该项的 `module.cwasm/full.asm/symbols.txt` 仍可用于静态分析。
+PASS 表示执行、校验和产物生成通过，不保证每个内核已采集足够样本；检查 report 和采样日志。
+缺少 JIT ELF 映射或没有可注释的样本时明确失败，不把空文件视为完整分析结果。
+
+也可只用原运行器保存编译产物，之后自行反汇编：
+
+```bash
+python utilities/run_wasmtime.py --benchmark all --bits both \
+  --build-dir build --native-dir build \
+  --emit-code-dir build/compiled-v1 --json build/compiled-v1-results.json
+
+objdump -D -z --section=.text -M intel \
+  build/compiled-v1/gemm/wasm64/module.cwasm > build/gemm-wasm64-full.asm
+```
+
+源码行号并非生成汇编的前提。当前流程不自动添加调试编译参数或改变优化设置；如需源码行映射，
+另建带调试信息的产物并配置 Wasmtime debug_info，记录它与当前性能基线的区别。
+参考：[Wasmtime JIT/perf 工作流](https://docs.wasmtime.dev/examples-profiling-perf.html)。
+
 ## 验证记录
+
+完整汇编流程已在 macOS arm64、Python Wasmtime 50.0.1 上实际执行全部 30 项、两种位宽共 60 个
+MEDIUM 模块：均通过原生参考校验，生成 `.cwasm`、完整汇编和符号表；检查反汇编地址覆盖了各模块
+完整 `.text` 区间。另检查序列化产物可重新加载执行、已有目录/产物拒绝覆盖、缺失输入后继续任务。
+样本数估算、哈希不匹配、超时清理、JIT 后处理顺序与缺失映射失败通过模拟工具检查。
+Linux x86_64 的真实 `perf record/inject/annotate` 尚未在本地执行，需在目标实验机验证；
+上述 ARM64 汇编与模拟采样均不作为 x86-64 性能证据。
 
 新增 profiling 后，在 macOS arm64 上完成全部 30 项 MEDIUM 的普通模式回归（两种位宽、原生参考，
 每种位宽预热 1 次、采样 5 次），全部通过。单个位宽在另一模块不存在时通过，
