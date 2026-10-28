@@ -68,7 +68,8 @@ GEMM 已与其他程序统一，不再保留 `GEMM_REMAIN_KERNEL`、`gemm_*` 和
 从旧版本升级时，重新编译 GEMM 的两个 Wasm 文件和原生库；单项使用 `--benchmark gemm`，批量使用 `--benchmark all`。
 
 Python 包内置自己的 Wasmtime 引擎，不调用系统的 CLI。脚本要求模块零导入，不伪造 WASI 接口。
-`--native-dir` 要求每项原生库存在，缺失时失败；省略它时明确标记为 cross-mode only。
+`--native-dir` 要求每项原生库存在，缺失时失败；省略它时，双位宽模式标记为 cross-mode only，
+单个位宽模式只检查结果有限性、checksum 和重初始化等自洽性，不表示通过独立参考校验。
 两种 Wasm 一致不是独立正确性证明；原生参考也使用同一内核与适配层，不是独立数学实现。
 
 | 选项 | 默认值/作用 |
@@ -76,6 +77,10 @@ Python 包内置自己的 Wasmtime 引擎，不调用系统的 CLI。脚本要�
 | `--warmups` | 5，至少 1 |
 | `--samples` | 31，至少 5 |
 | `--seed` | 20261027，每轮随机决定 32/64 先后顺序 |
+| `--bits` | `both`，也可选 `32` 或 `64`；单个位宽只加载所选模块，不计算 T64/T32 |
+| `--profile` | `none`；`counters` 在 Linux x86_64 上采集内核调用区间的硬件计数器 |
+| `--events` | profiling 时默认 `cycles,instructions,branches,branch-misses`；逗号分隔的非重复子集 |
+| `--cpu` | 可选，绑定到当前允许的某个 Linux 逻辑 CPU，绑定发生在 Engine 创建前 |
 | `--rtol` / `--atol` | 显式覆盖浮点容差并记录；整数始终精确比较 |
 | `--allow-nonfinite` | 调查时允许对应 NaN/Inf，结果标记 `PASS_NONFINITE_ALLOWED`，不表示数值有效 |
 | `--json` | 保存环境、参数、校验状态、输出描述、二进制哈希、原始样本和统计 |
@@ -134,7 +139,84 @@ MINI/SMALL 用于校验和回归，MEDIUM 用于完整校验及每种位宽 31 �
 跨程序应逐项报告；若给总指标，需说明几何平均和异常项处理，不将毫秒跨程序直接算术平均。
 推荐固定 CPU、多次独立启动，并记录硬件、系统、编译器和运行时版本。
 
+## 内核调用区间的硬件 profiling
+
+此模式使用 Python 标准库 `ctypes` 调用 Linux `perf_event_open`，无需安装 `perf` 命令，
+无需修改 C 内核或重新编译已有 Wasm。首版仅支持 Linux x86_64 上的 64 位 Python。
+普通模式在其他原有平台上继续可用。硬件/虚拟机必须提供 PMU，且当前用户具有采集权限。
+
+```bash
+# 先查看逻辑核与物理核的对应关系，选择一个允许使用的核，并保持其 SMT 兄弟线程空闲。
+lscpu -e=CPU,CORE,SOCKET,ONLINE
+
+# 示例使用逻辑 CPU 2，请按实际允许的 CPU 集合调整。
+# 单次进程只采集 wasm32；仍用原生参考校验。
+python utilities/run_wasmtime.py --benchmark gemm --bits 32 \
+  --profile counters --events cycles,instructions,branches,branch-misses \
+  --cpu 2 --build-dir build --native-dir build \
+  --json build/gemm-wasm32-counters.json
+
+python utilities/run_wasmtime.py --benchmark gemm --bits 64 \
+  --profile counters --events cycles,instructions,branches,branch-misses \
+  --cpu 2 --build-dir build --native-dir build \
+  --json build/gemm-wasm64-counters.json
+
+# 同一进程交替两种位宽，计数按样本、位宽分别保存；也可使用 --benchmark all。
+python utilities/run_wasmtime.py --benchmark jacobi-2d gemm nussinov seidel-2d adi \
+  --bits both --profile counters --cpu 2 \
+  --build-dir build --native-dir build --json build/counters-results.json
+```
+
+每个样本执行以下流程，预热不计数：
+
+```text
+bench_init() → 读取上一次累计计数时间、重置并开启计数器
+             → 开始计时 → bench_run() → 结束计时
+             → 关闭计数器 → 读取硬件统计 → 校验结果
+```
+
+计数器绑定当前执行线程，不继承给 JIT 工作线程；排除内核态和 hypervisor。
+加载、JIT 编译、初始化、预热、原生参考和校验均在计数区间外。
+这仍是“宿主调用加内核”的统计：包括 Python/FFI/Wasmtime 进出、时钟读取及计数器控制边界的
+少量用户态指令，不能称为纯 Wasm 指令统计。异常退出内核时也关闭计数器。
+profiling 下的耗时明确标记，不能直接替换未开启 profiling 的性能基线。
+较短内核应另外评估调用和采集开销；每个样本必须恢复输入，不能直接连续调用内核替代。
+
+| 指标 | 含义 |
+| --- | --- |
+| `cycles` | 当前线程用户态执行消耗的 CPU 周期 |
+| `instructions` | 退休的 CPU 机器指令数，不是 Wasm 指令数 |
+| `branches` | 退休的分支指令数 |
+| `branch-misses` | 预测失败的退休分支数 |
+| IPC | instructions / cycles；只有同时选择这两个事件才计算 |
+
+事件组成一个组，同步启停与读取。每个样本的 `records[].counters` 保存 `counts`、
+`time_enabled_ns`、`time_running_ns`、`running_ratio` 和 `ipc`。
+Linux 的 RESET 不清零累计计数时间，脚本按样本计算时间差。
+`counter_summary` 按位宽保存总计数、每次调用计数的中位数/均值、最小运行比例，
+以及用总 instructions / 总 cycles 计算的 IPC（不平均每次的 IPC）。
+单个位宽结果的 `cross_mode_validation` 为 false，`median_time_ratio_64_over_32` 为 null，
+但仍保留所有所选模块的校验和二进制哈希。报告记录实际 CPU affinity。
+
+首版采用严格策略：计数器未运行、读取不完整或 `time_running != time_enabled` 时该项失败，
+不将复用计数自动放大为估算值。可减少事件，例如先采 `--events cycles,instructions`，
+再单独采 `--events branches,branch-misses`，或关闭竞争使用 PMU 的其他 profiler。
+权限不足或 PMU 不可用时会给出系统错误，检查 `/proc/sys/kernel/perf_event_paranoid`、
+管理员授予的 `CAP_PERFMON` 及虚拟机 PMU 支持；脚本不会修改权限配置或静默退回计时模式。
+失败记录为 `FAIL`，最终退出码为 1，不能将失败项混入硬件分析。
+
+建议在目标机器多次独立运行并交替 32/64 顺序，另外记录实际频率、温度、CPU 型号和编译命令。
+此版本提供计数统计，不包含 `perf record` 热点采样、JIT 符号映射或缓存/TLB 事件。
+接口依据：[Linux perf_event_open 手册](https://man7.org/linux/man-pages/man2/perf_event_open.2.html)。
+
 ## 验证记录
+
+新增 profiling 后，在 macOS arm64 上完成全部 30 项 MEDIUM 的普通模式回归（两种位宽、原生参考，
+每种位宽预热 1 次、采样 5 次），全部通过。单个位宽在另一模块不存在时通过，
+非法参数和不支持平台的失败报告也已检查。模拟系统接口检查了 ABI 布局、事件 ID 对应、
+累计时间差、未运行/复用拒绝、部分打开失败时关闭描述符，以及内核异常时关闭计数器；
+模拟计数器配合真实 Wasm 验证了 JSON 汇总链路。这些模拟计数不是硬件测量数据。
+Linux x86_64 的真实 PMU 采集仍需在实验机验证，不能由上述 macOS 检查替代。
 
 先前版本已验证全部 30 项 MEDIUM 的 wasm32、wasm64 和原生参考结果，以及原 29 项的 MINI/SMALL 和旧模式。
 本次统一后，在 macOS arm64、Emscripten 6.0.10、Python Wasmtime 50.0.1 下，

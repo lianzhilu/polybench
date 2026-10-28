@@ -9,10 +9,12 @@ from importlib.metadata import version
 import itertools
 import json
 import math
+import os
 from pathlib import Path
 import platform
 import random
 import statistics
+import struct
 import sys
 from time import perf_counter_ns
 
@@ -21,6 +23,133 @@ import wasmtime
 ROOT = Path(__file__).resolve().parent.parent
 TYPES = {1: ("float64", "d", 8), 2: ("float32", "f", 4), 3: ("int32", "i", 4)}
 MEMORY_BYTES = 536870912
+PERF_EVENTS = {"cycles": 0, "instructions": 1, "branches": 4, "branch-misses": 5}
+
+
+class PerfEventAttr(ctypes.Structure):
+    """Linux perf_event_attr ABI v0 (64 bytes); newer fields are unused."""
+
+    _fields_ = [("type", ctypes.c_uint32), ("size", ctypes.c_uint32),
+                ("config", ctypes.c_uint64), ("sample_period", ctypes.c_uint64),
+                ("sample_type", ctypes.c_uint64), ("read_format", ctypes.c_uint64),
+                ("flags", ctypes.c_uint64), ("wakeup_events", ctypes.c_uint32),
+                ("bp_type", ctypes.c_uint32), ("config1", ctypes.c_uint64)]
+
+
+class PerfCounters:
+    """Thread-local user-space hardware event group, Linux x86_64 only.
+
+    Constants follow linux/perf_event.h and the x86_64 syscall ABI. No
+    subprocess or Wasm import is needed. Counts include host-call overhead.
+    """
+
+    def __init__(self, events):
+        if (platform.system() != "Linux" or platform.machine() not in ("x86_64", "AMD64")
+                or ctypes.sizeof(ctypes.c_void_p) != 8):
+            raise ValueError("--profile counters requires 64-bit Python on Linux x86_64")
+        import fcntl
+        self.ioctl = fcntl.ioctl
+        self.fds, self.ids = [], {}
+        self.events = events
+        libc = ctypes.CDLL(None, use_errno=True)
+        syscall = libc.syscall
+        syscall.restype = ctypes.c_long
+        syscall.argtypes = [ctypes.c_long, ctypes.POINTER(PerfEventAttr),
+                            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+        try:
+            for event in events:
+                attr = PerfEventAttr()
+                attr.size = ctypes.sizeof(attr)
+                attr.type, attr.config = 0, PERF_EVENTS[event]  # PERF_TYPE_HARDWARE
+                attr.read_format = 1 | 2 | 4 | 8  # enabled, running, ID, GROUP
+                attr.flags = (1 if not self.fds else 0) | (1 << 5) | (1 << 6)
+                # pid=0: this thread; cpu=-1: follows it; no inheritance.
+                fd = syscall(298, ctypes.byref(attr), 0, -1,
+                             self.fds[0] if self.fds else -1, 8)  # FD_CLOEXEC
+                if fd < 0:
+                    error = ctypes.get_errno()
+                    raise OSError(error, f"perf_event_open({event}): {os.strerror(error)}. "
+                                  "Check /proc/sys/kernel/perf_event_paranoid, CAP_PERFMON "
+                                  "and hardware/VM PMU support; no timing-only fallback.")
+                self.fds.append(fd)
+                event_id = array("Q", [0])
+                self.ioctl(fd, 0x80082407, event_id, True)  # PERF_EVENT_IOC_ID
+                self.ids[event_id[0]] = event
+        except BaseException:
+            self.close()
+            raise
+
+    def read(self):
+        size = 24 + 16 * len(self.events)
+        raw = os.read(self.fds[0], size)
+        if len(raw) != size:
+            raise ValueError("Incomplete PMU group read; events may not be schedulable")
+        words = struct.unpack("=" + "Q" * (size // 8), raw)
+        if words[0] != len(self.events):
+            raise ValueError("Incorrect PMU event group size")
+        counts = {}
+        for value, event_id in zip(words[3::2], words[4::2]):
+            if event_id not in self.ids or self.ids[event_id] in counts:
+                raise ValueError("Incorrect PMU event ID")
+            counts[self.ids[event_id]] = value
+        return words[1], words[2], counts
+
+    def start(self):
+        # RESET clears counts, but NOT cumulative time_enabled/time_running.
+        # Save the latter while disabled and subtract them after this sample.
+        self.before = self.read()[:2]
+        self.ioctl(self.fds[0], 0x2403, 1)  # RESET, PERF_IOC_FLAG_GROUP
+        self.ioctl(self.fds[0], 0x2400, 1)  # ENABLE group
+
+    def stop(self):
+        self.ioctl(self.fds[0], 0x2401, 1)  # DISABLE group
+
+    def sample(self):
+        enabled, running, counts = self.read()
+        enabled -= self.before[0]
+        running -= self.before[1]
+        if enabled <= 0 or running <= 0 or running > enabled:
+            raise ValueError(f"Invalid PMU running time: enabled={enabled}, running={running}")
+        if running != enabled:
+            raise ValueError(f"PMU group was multiplexed: enabled={enabled}, running={running}. "
+                             "Use fewer --events or stop competing profilers; counts are not scaled.")
+        if "cycles" in counts and counts["cycles"] == 0:
+            raise ValueError("PMU reported zero cycles for the kernel call")
+        return {"counts": counts, "time_enabled_ns": enabled, "time_running_ns": running,
+                "running_ratio": running / enabled,
+                "ipc": (counts["instructions"] / counts["cycles"]
+                        if "instructions" in counts and "cycles" in counts else None)}
+
+    def close(self):
+        # Closing all group descriptors also stops counting on failure.
+        for fd in reversed(self.fds):
+            os.close(fd)
+        self.fds.clear()
+
+
+def measure(bench, counters):
+    if counters is not None:
+        counters.start()
+    try:
+        start = perf_counter_ns()
+        bench.run()
+        elapsed_ms = (perf_counter_ns() - start) / 1e6
+    finally:
+        if counters is not None:
+            counters.stop()
+    return elapsed_ms, counters.sample() if counters is not None else None
+
+
+def counter_summary(records, bits, events):
+    samples = [r["counters"] for r in records if r["bits"] == bits]
+    totals = {event: sum(s["counts"][event] for s in samples) for event in events}
+    return {"samples": len(samples), "total_counts": totals,
+            "median_counts_per_call": {
+                event: statistics.median(s["counts"][event] for s in samples) for event in events},
+            "mean_counts_per_call": {event: total / len(samples) for event, total in totals.items()},
+            "ipc": (totals["instructions"] / totals["cycles"]
+                    if "instructions" in totals and "cycles" in totals else None),
+            "min_running_ratio": min(s["running_ratio"] for s in samples)}
 
 
 def metadata(bench):
@@ -216,8 +345,11 @@ def stats(values):
 def run_benchmark(name, engine, args):
     benches = {}
     native = None
+    counters = None
     try:
-        for bits in (32, 64):
+        if args.profile == "counters":
+            counters = PerfCounters(args.events)
+        for bits in args.bits:
             path = args.build_dir / f"{name}-remain-kernel-wasm{bits}.wasm"
             benches[bits] = WasmBenchmark(engine, path, bits)
         baselines, descriptors, sums = {}, {}, {}
@@ -236,10 +368,13 @@ def run_benchmark(name, engine, args):
                 expected_sums.append(total)
             check_checksums(sums[bits], expected_sums, descriptors[bits], args, f"wasm{bits} host read")
             compare(baselines[bits], baselines[bits], descriptors[bits], args, f"wasm{bits} finite check")
-        if descriptors[32] != descriptors[64]:
-            raise ValueError("wasm32 and wasm64 parameters/output layouts differ")
-        desc = descriptors[32]
-        compare(baselines[64], baselines[32], desc, args, "wasm32/wasm64")
+        cross_mode = len(benches) == 2
+        first_bits = args.bits[0]
+        if cross_mode:
+            if descriptors[32] != descriptors[64]:
+                raise ValueError("wasm32 and wasm64 parameters/output layouts differ")
+            compare(baselines[64], baselines[32], descriptors[32], args, "wasm32/wasm64")
+        desc = descriptors[first_bits]
         if args.native_dir is not None:
             native = NativeBenchmark(args.native_dir / f"lib{name}-remain-kernel.so")
             native.init()
@@ -247,7 +382,7 @@ def run_benchmark(name, engine, args):
                 raise ValueError("Native reference parameters/output layouts differ")
             native.run()
             reference = snapshot(native, desc)
-            for bits in (32, 64):
+            for bits in args.bits:
                 compare(baselines[bits], reference, desc, args, f"wasm{bits}/native")
         # Release/reset lifecycle and every output must reproduce the baseline.
         for bits, bench in benches.items():
@@ -261,41 +396,59 @@ def run_benchmark(name, engine, args):
                 bench.init()
                 bench.run()
 
-        records, times = [], {32: [], 64: []}
+        records, times = [], {bits: [] for bits in args.bits}
         rng = random.Random(args.seed)
         for sample in range(args.samples):
-            order = [32, 64]
+            order = list(args.bits)
             rng.shuffle(order)
             for position, bits in enumerate(order):
                 bench = benches[bits]
                 bench.init()
-                start = perf_counter_ns()
-                bench.run()
-                elapsed_ms = (perf_counter_ns() - start) / 1e6
+                # Keep the original timing path unchanged when profiling is off.
+                if counters is None:
+                    start = perf_counter_ns()
+                    bench.run()
+                    elapsed_ms = (perf_counter_ns() - start) / 1e6
+                    counter_sample = None
+                else:
+                    elapsed_ms, counter_sample = measure(bench, counters)
                 check_checksums(checksums(bench, len(desc["outputs"])), sums[bits], desc,
                                 args, f"wasm{bits} sample {sample}")
                 times[bits].append(elapsed_ms)
                 records.append({"sample": sample, "position": position,
                                 "bits": bits, "elapsed_ms": elapsed_ms})
+                if counter_sample is not None:
+                    records[-1]["counters"] = counter_sample
         for bits, bench in benches.items():
             compare(snapshot(bench, desc), baselines[bits], desc, args, f"wasm{bits} final")
         summary = {bits: stats(values) for bits, values in times.items()}
-        ratio = summary[64]["median_ms"] / summary[32]["median_ms"]
-        nonfinite = [sum(not math.isfinite(v) for v in values) for values in baselines[32]]
+        ratio = summary[64]["median_ms"] / summary[32]["median_ms"] if cross_mode else None
+        nonfinite = [sum(not math.isfinite(v) for v in values) for values in baselines[first_bits]]
+        hardware = ({bits: counter_summary(records, bits, args.events) for bits in args.bits}
+                    if counters is not None else None)
         status = "PASS_NONFINITE_ALLOWED" if any(nonfinite) else "PASS"
-        print(f"{name}: {status}; native_reference={native is not None}; "
-              f"elements={[len(v) for v in baselines[32]]}; imports=0", flush=True)
-        for bits in (32, 64):
+        print(f"{name}: {status}; native_reference={native is not None}; cross_mode={cross_mode}; "
+              f"elements={[len(v) for v in baselines[first_bits]]}; imports=0", flush=True)
+        for bits in args.bits:
             s = summary[bits]
             print(f"  wasm{bits}: median={s['median_ms']:.6f} ms; "
                   f"IQR=[{s['q1_ms']:.6f}, {s['q3_ms']:.6f}] ms")
-        print(f"  T64/T32={ratio:.6f}", flush=True)
+            if hardware is not None:
+                h = hardware[bits]
+                print(f"    PMU median counts/call: {h['median_counts_per_call']}; "
+                      f"IPC={h['ipc']}; min_running_ratio={h['min_running_ratio']}", flush=True)
+        if ratio is not None:
+            print(f"  T64/T32={ratio:.6f}", flush=True)
         return {"benchmark": name, "status": status, "native_reference": native is not None,
+                "cross_mode_validation": cross_mode, "profile": args.profile,
+                "counter_summary": hardware,
                 "native_sha256": native.sha256 if native else None,
                 "descriptors": desc, "nonfinite_elements": nonfinite,
                 "module_sha256": {bits: bench.sha256 for bits, bench in benches.items()},
                 "summary": summary, "median_time_ratio_64_over_32": ratio, "records": records}
     finally:
+        if counters is not None:
+            counters.close()
         for bench in benches.values():
             bench.free()
         if native is not None:
@@ -321,12 +474,33 @@ def main():
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--samples", type=int, default=31)
     parser.add_argument("--seed", type=int, default=20261027)
+    parser.add_argument("--bits", choices=("32", "64", "both"), default="both",
+                        help="Wasm pointer width(s); single-width runs omit the time ratio")
+    parser.add_argument("--profile", choices=("none", "counters"), default="none",
+                        help="optional Linux x86_64 thread-local hardware counters")
+    parser.add_argument("--events", help="comma-separated counters: " + ",".join(PERF_EVENTS))
+    parser.add_argument("--cpu", type=int, help="bind to one allowed Linux logical CPU before engine creation")
     parser.add_argument("--rtol", type=float)
     parser.add_argument("--atol", type=float)
     parser.add_argument("--allow-nonfinite", action="store_true",
                         help="explicitly allow matching NaN/Inf; marks results, not a numerical pass")
     parser.add_argument("--json", type=Path, help="save raw samples, metadata and validation results")
     args = parser.parse_args()
+    args.bits = [32, 64] if args.bits == "both" else [int(args.bits)]
+    if args.events is not None and args.profile != "counters":
+        parser.error("--events requires --profile counters")
+    args.events = list(PERF_EVENTS) if args.events is None else [e.strip() for e in args.events.split(",")]
+    if any(e not in PERF_EVENTS for e in args.events) or len(set(args.events)) != len(args.events):
+        parser.error("Unknown, empty or duplicate event. Available: " + ",".join(PERF_EVENTS))
+    if args.cpu is not None:
+        if not hasattr(os, "sched_setaffinity"):
+            parser.error("--cpu requires Linux CPU affinity support")
+        if args.cpu not in os.sched_getaffinity(0):
+            parser.error("--cpu must be in the current thread's allowed CPU set")
+        try:
+            os.sched_setaffinity(0, {args.cpu})
+        except OSError as error:
+            parser.error(str(error))
     if args.warmups < 1 or args.samples < 5:
         parser.error("Use at least one warmup and five samples")
     if any(v is not None and (not math.isfinite(v) or v < 0) for v in (args.rtol, args.atol)):
@@ -345,6 +519,15 @@ def main():
               "release": platform.release(), "machine": platform.machine(),
               "processor": platform.processor(), "samples": args.samples,
               "warmups": args.warmups, "seed": args.seed,
+              "bits": args.bits,
+              "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
+              "profiling": {"mode": args.profile,
+                            "events": args.events if args.profile == "counters" else [],
+                            "scope": ("current thread, user space; kernel call plus Python/FFI/"
+                                      "Wasmtime, clock and counter-control boundary overhead"
+                                      if args.profile == "counters" else None),
+                            "multiplex_policy": "reject; no scaling",
+                            "timing_with_profiling": args.profile != "none"},
               "rtol_override": args.rtol, "atol_override": args.atol,
               "allow_nonfinite": args.allow_nonfinite,
               "runtime": {"memory64_enabled_for_both": True, "compiler": "cranelift", "opt_level": "speed"},
@@ -353,8 +536,13 @@ def main():
               "results": []}
     print(f"Wasmtime Python {version('wasmtime')}; {platform.system()} {platform.machine()}", flush=True)
     print("Cache policy: reset all arrays; no explicit cache flush", flush=True)
+    if args.profile == "counters":
+        print("Profiling: user-space current-thread counters around bench_run; includes host/clock "
+              "and control-boundary overhead. Timings are profiling-enabled measurements.", flush=True)
     if args.native_dir is None:
-        print("Validation: cross-mode only; no native reference was requested", flush=True)
+        print("Validation: " + ("cross-mode only" if len(args.bits) == 2 else
+              "single-width self-consistency only; no cross-mode comparison") +
+              "; no native reference was requested", flush=True)
     for name in names:
         print(f"Validating {name} ...", flush=True)
         try:
