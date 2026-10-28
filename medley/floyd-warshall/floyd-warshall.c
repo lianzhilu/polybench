@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "floyd-warshall.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -39,6 +43,7 @@ void init_array (int n,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int n,
 		 DATA_TYPE POLYBENCH_2D(path,N,N,n,n))
@@ -56,6 +61,7 @@ void print_array(int n,
   POLYBENCH_DUMP_END("path");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -79,6 +85,47 @@ void kernel_floyd_warshall(int n,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+WB_DECLARE_2D(DATA_TYPE, path, N, N);
+
+void bench_init(void)
+{
+  WB_RESET(path);
+  init_array (n, POLYBENCH_ARRAY(path));
+  wb_output_count = 1;
+  WB_OUTPUT_2D(0, path, n, n, WB_FULL);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_floyd_warshall (n, POLYBENCH_ARRAY(path));
+}
+
+int bench_param_count(void)
+{
+  return 1;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n};
+  wb_require(index >= 0 && index < 1);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(path);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -110,3 +157,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

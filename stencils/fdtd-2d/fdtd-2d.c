@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "fdtd-2d.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -47,6 +51,7 @@ void init_array (int tmax,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int nx,
 		 int ny,
@@ -82,6 +87,7 @@ void print_array(int nx,
     }
   POLYBENCH_DUMP_END("hz");
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -119,6 +125,68 @@ void kernel_fdtd_2d(int tmax,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int tmax = TMAX;
+static int nx = NX;
+static int ny = NY;
+WB_DECLARE_2D(DATA_TYPE, ex, NX, NY);
+WB_DECLARE_2D(DATA_TYPE, ey, NX, NY);
+WB_DECLARE_2D(DATA_TYPE, hz, NX, NY);
+WB_DECLARE_1D(DATA_TYPE, _fict_, TMAX);
+
+void bench_init(void)
+{
+  WB_RESET(ex);
+  WB_RESET(ey);
+  WB_RESET(hz);
+  WB_RESET(_fict_);
+  init_array (tmax, nx, ny,
+	      POLYBENCH_ARRAY(ex),
+	      POLYBENCH_ARRAY(ey),
+	      POLYBENCH_ARRAY(hz),
+	      POLYBENCH_ARRAY(_fict_));
+  wb_output_count = 3;
+  WB_OUTPUT_2D(0, ex, nx, ny, WB_FULL);
+  WB_OUTPUT_2D(1, ey, nx, ny, WB_FULL);
+  WB_OUTPUT_2D(2, hz, nx, ny, WB_FULL);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_fdtd_2d (tmax, nx, ny,
+		  POLYBENCH_ARRAY(ex),
+		  POLYBENCH_ARRAY(ey),
+		  POLYBENCH_ARRAY(hz),
+		  POLYBENCH_ARRAY(_fict_));
+}
+
+int bench_param_count(void)
+{
+  return 3;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {tmax, nx, ny};
+  wb_require(index >= 0 && index < 3);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(ex);
+  WB_FREE(ey);
+  WB_FREE(hz);
+  WB_FREE(_fict_);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -168,3 +236,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

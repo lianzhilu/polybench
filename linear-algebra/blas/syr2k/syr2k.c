@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "syr2k.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -48,6 +52,7 @@ void init_array(int n, int m,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int n,
 		 DATA_TYPE POLYBENCH_2D(C,N,N,n,n))
@@ -64,6 +69,7 @@ void print_array(int n,
   POLYBENCH_DUMP_END("C");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -99,6 +105,63 @@ void kernel_syr2k(int n, int m,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+static int m = M;
+static DATA_TYPE alpha;
+static DATA_TYPE beta;
+WB_DECLARE_2D(DATA_TYPE, C, N, N);
+WB_DECLARE_2D(DATA_TYPE, A, N, M);
+WB_DECLARE_2D(DATA_TYPE, B, N, M);
+
+void bench_init(void)
+{
+  WB_RESET(C);
+  WB_RESET(A);
+  WB_RESET(B);
+  init_array (n, m, &alpha, &beta,
+	      POLYBENCH_ARRAY(C),
+	      POLYBENCH_ARRAY(A),
+	      POLYBENCH_ARRAY(B));
+  wb_output_count = 1;
+  WB_OUTPUT_2D(0, C, n, n, WB_FULL);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_syr2k (n, m,
+		alpha, beta,
+		POLYBENCH_ARRAY(C),
+		POLYBENCH_ARRAY(A),
+		POLYBENCH_ARRAY(B));
+}
+
+int bench_param_count(void)
+{
+  return 2;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n, m};
+  wb_require(index >= 0 && index < 2);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(C);
+  WB_FREE(A);
+  WB_FREE(B);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -143,3 +206,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

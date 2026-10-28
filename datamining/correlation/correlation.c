@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "correlation.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -41,6 +45,7 @@ void init_array (int m,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int m,
 		 DATA_TYPE POLYBENCH_2D(corr,M,M,m,m))
@@ -58,6 +63,7 @@ void print_array(int m,
   POLYBENCH_DUMP_END("corr");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -124,6 +130,62 @@ void kernel_correlation(int m, int n,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+static int m = M;
+static DATA_TYPE float_n;
+WB_DECLARE_2D(DATA_TYPE, data, N, M);
+WB_DECLARE_2D(DATA_TYPE, corr, M, M);
+WB_DECLARE_1D(DATA_TYPE, mean, M);
+WB_DECLARE_1D(DATA_TYPE, stddev, M);
+
+void bench_init(void)
+{
+  WB_RESET(data);
+  WB_RESET(corr);
+  WB_RESET(mean);
+  WB_RESET(stddev);
+  init_array (m, n, &float_n, POLYBENCH_ARRAY(data));
+  wb_output_count = 1;
+  WB_OUTPUT_2D(0, corr, m, m, WB_FULL);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_correlation (m, n, float_n,
+		      POLYBENCH_ARRAY(data),
+		      POLYBENCH_ARRAY(corr),
+		      POLYBENCH_ARRAY(mean),
+		      POLYBENCH_ARRAY(stddev));
+}
+
+int bench_param_count(void)
+{
+  return 2;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n, m};
+  wb_require(index >= 0 && index < 2);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(data);
+  WB_FREE(corr);
+  WB_FREE(mean);
+  WB_FREE(stddev);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -166,3 +228,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

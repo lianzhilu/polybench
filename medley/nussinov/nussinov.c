@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "nussinov.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 /* RNA bases represented as chars, range is [0,3] */
 typedef char base;
 
@@ -47,6 +51,7 @@ void init_array (int n,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int n,
 		 DATA_TYPE POLYBENCH_2D(table,N,N,n,n))
@@ -67,6 +72,7 @@ void print_array(int n,
   POLYBENCH_DUMP_END("table");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -109,6 +115,50 @@ void kernel_nussinov(int n, base POLYBENCH_1D(seq,N,n),
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+WB_DECLARE_1D(base, seq, N);
+WB_DECLARE_2D(DATA_TYPE, table, N, N);
+
+void bench_init(void)
+{
+  WB_RESET(seq);
+  WB_RESET(table);
+  init_array (n, POLYBENCH_ARRAY(seq), POLYBENCH_ARRAY(table));
+  wb_output_count = 1;
+  WB_OUTPUT_2D(0, table, n, n, WB_UPPER);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_nussinov (n, POLYBENCH_ARRAY(seq), POLYBENCH_ARRAY(table));
+}
+
+int bench_param_count(void)
+{
+  return 1;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n};
+  wb_require(index >= 0 && index < 1);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(seq);
+  WB_FREE(table);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -141,3 +191,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

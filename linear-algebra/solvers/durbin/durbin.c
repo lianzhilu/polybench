@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "durbin.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -37,6 +41,7 @@ void init_array (int n,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int n,
 		 DATA_TYPE POLYBENCH_1D(y,N,n))
@@ -53,6 +58,7 @@ void print_array(int n,
   POLYBENCH_DUMP_END("y");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -95,6 +101,52 @@ void kernel_durbin(int n,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+WB_DECLARE_1D(DATA_TYPE, r, N);
+WB_DECLARE_1D(DATA_TYPE, y, N);
+
+void bench_init(void)
+{
+  WB_RESET(r);
+  WB_RESET(y);
+  init_array (n, POLYBENCH_ARRAY(r));
+  wb_output_count = 1;
+  WB_OUTPUT_1D(0, y, n);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_durbin (n,
+		 POLYBENCH_ARRAY(r),
+		 POLYBENCH_ARRAY(y));
+}
+
+int bench_param_count(void)
+{
+  return 1;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n};
+  wb_require(index >= 0 && index < 1);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(r);
+  WB_FREE(y);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -130,3 +182,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

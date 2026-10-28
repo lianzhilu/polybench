@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "bicg.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -42,6 +46,7 @@ void init_array (int m, int n,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int m, int n,
 		 DATA_TYPE POLYBENCH_1D(s,M,m),
@@ -65,6 +70,7 @@ void print_array(int m, int n,
   POLYBENCH_DUMP_END("q");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -96,6 +102,69 @@ void kernel_bicg(int m, int n,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+static int m = M;
+WB_DECLARE_2D(DATA_TYPE, A, N, M);
+WB_DECLARE_1D(DATA_TYPE, s, M);
+WB_DECLARE_1D(DATA_TYPE, q, N);
+WB_DECLARE_1D(DATA_TYPE, p, M);
+WB_DECLARE_1D(DATA_TYPE, r, N);
+
+void bench_init(void)
+{
+  WB_RESET(A);
+  WB_RESET(s);
+  WB_RESET(q);
+  WB_RESET(p);
+  WB_RESET(r);
+  init_array (m, n,
+	      POLYBENCH_ARRAY(A),
+	      POLYBENCH_ARRAY(r),
+	      POLYBENCH_ARRAY(p));
+  wb_output_count = 2;
+  WB_OUTPUT_1D(0, s, m);
+  WB_OUTPUT_1D(1, q, n);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_bicg (m, n,
+	       POLYBENCH_ARRAY(A),
+	       POLYBENCH_ARRAY(s),
+	       POLYBENCH_ARRAY(q),
+	       POLYBENCH_ARRAY(p),
+	       POLYBENCH_ARRAY(r));
+}
+
+int bench_param_count(void)
+{
+  return 2;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n, m};
+  wb_require(index >= 0 && index < 2);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(A);
+  WB_FREE(s);
+  WB_FREE(q);
+  WB_FREE(p);
+  WB_FREE(r);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -143,3 +212,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

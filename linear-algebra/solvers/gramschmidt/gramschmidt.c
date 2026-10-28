@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "gramschmidt.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -43,6 +47,7 @@ void init_array(int m, int n,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int m, int n,
 		 DATA_TYPE POLYBENCH_2D(A,M,N,m,n),
@@ -69,6 +74,7 @@ void print_array(int m, int n,
   POLYBENCH_DUMP_END("Q");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -108,6 +114,61 @@ void kernel_gramschmidt(int m, int n,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int m = M;
+static int n = N;
+WB_DECLARE_2D(DATA_TYPE, A, M, N);
+WB_DECLARE_2D(DATA_TYPE, R, N, N);
+WB_DECLARE_2D(DATA_TYPE, Q, M, N);
+
+void bench_init(void)
+{
+  WB_RESET(A);
+  WB_RESET(R);
+  WB_RESET(Q);
+  init_array (m, n,
+	      POLYBENCH_ARRAY(A),
+	      POLYBENCH_ARRAY(R),
+	      POLYBENCH_ARRAY(Q));
+  wb_output_count = 2;
+  WB_OUTPUT_2D(0, R, n, n, WB_FULL);
+  WB_OUTPUT_2D(1, Q, m, n, WB_FULL);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_gramschmidt (m, n,
+		      POLYBENCH_ARRAY(A),
+		      POLYBENCH_ARRAY(R),
+		      POLYBENCH_ARRAY(Q));
+}
+
+int bench_param_count(void)
+{
+  return 2;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {m, n};
+  wb_require(index >= 0 && index < 2);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(A);
+  WB_FREE(R);
+  WB_FREE(Q);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -149,3 +210,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

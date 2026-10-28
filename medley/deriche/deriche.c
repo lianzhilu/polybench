@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "deriche.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -40,6 +44,7 @@ void init_array (int w, int h, DATA_TYPE* alpha,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int w, int h,
 		 DATA_TYPE POLYBENCH_2D(imgOut,W,H,w,h))
@@ -57,6 +62,7 @@ void print_array(int w, int h,
   POLYBENCH_DUMP_END("imgOut");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 
@@ -155,6 +161,58 @@ void kernel_deriche(int w, int h, DATA_TYPE alpha,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int w = W;
+static int h = H;
+static DATA_TYPE alpha;
+WB_DECLARE_2D(DATA_TYPE, imgIn, W, H);
+WB_DECLARE_2D(DATA_TYPE, imgOut, W, H);
+WB_DECLARE_2D(DATA_TYPE, deriche_y1, W, H);
+WB_DECLARE_2D(DATA_TYPE, deriche_y2, W, H);
+
+void bench_init(void)
+{
+  WB_RESET(imgIn);
+  WB_RESET(imgOut);
+  WB_RESET(deriche_y1);
+  WB_RESET(deriche_y2);
+  init_array (w, h, &alpha, POLYBENCH_ARRAY(imgIn), POLYBENCH_ARRAY(imgOut));
+  wb_output_count = 1;
+  WB_OUTPUT_2D(0, imgOut, w, h, WB_FULL);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_deriche (w, h, alpha, POLYBENCH_ARRAY(imgIn), POLYBENCH_ARRAY(imgOut), POLYBENCH_ARRAY(deriche_y1), POLYBENCH_ARRAY(deriche_y2));
+}
+
+int bench_param_count(void)
+{
+  return 2;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {w, h};
+  wb_require(index >= 0 && index < 2);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(imgIn);
+  WB_FREE(imgOut);
+  WB_FREE(deriche_y1);
+  WB_FREE(deriche_y2);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -194,3 +252,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

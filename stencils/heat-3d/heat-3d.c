@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "heat-3d.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -38,6 +42,7 @@ void init_array (int n,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int n,
 		 DATA_TYPE POLYBENCH_3D(A,N,N,N,n,n,n))
@@ -56,6 +61,7 @@ void print_array(int n,
   POLYBENCH_DUMP_END("A");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -96,6 +102,51 @@ void kernel_heat_3d(int tsteps,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+static int tsteps = TSTEPS;
+WB_DECLARE_3D(DATA_TYPE, A, N, N, N);
+WB_DECLARE_3D(DATA_TYPE, B, N, N, N);
+
+void bench_init(void)
+{
+  WB_RESET(A);
+  WB_RESET(B);
+  init_array (n, POLYBENCH_ARRAY(A), POLYBENCH_ARRAY(B));
+  wb_output_count = 1;
+  WB_OUTPUT_3D(0, A, n, n, n);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_heat_3d (tsteps, n, POLYBENCH_ARRAY(A), POLYBENCH_ARRAY(B));
+}
+
+int bench_param_count(void)
+{
+  return 2;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n, tsteps};
+  wb_require(index >= 0 && index < 2);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(A);
+  WB_FREE(B);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -129,3 +180,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

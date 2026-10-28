@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "gemver.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -61,6 +65,7 @@ void init_array (int n,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int n,
 		 DATA_TYPE POLYBENCH_1D(w,N,n))
@@ -76,6 +81,7 @@ void print_array(int n,
   POLYBENCH_DUMP_END("w");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -117,6 +123,91 @@ void kernel_gemver(int n,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+static DATA_TYPE alpha;
+static DATA_TYPE beta;
+WB_DECLARE_2D(DATA_TYPE, A, N, N);
+WB_DECLARE_1D(DATA_TYPE, u1, N);
+WB_DECLARE_1D(DATA_TYPE, v1, N);
+WB_DECLARE_1D(DATA_TYPE, u2, N);
+WB_DECLARE_1D(DATA_TYPE, v2, N);
+WB_DECLARE_1D(DATA_TYPE, w, N);
+WB_DECLARE_1D(DATA_TYPE, x, N);
+WB_DECLARE_1D(DATA_TYPE, y, N);
+WB_DECLARE_1D(DATA_TYPE, z, N);
+
+void bench_init(void)
+{
+  WB_RESET(A);
+  WB_RESET(u1);
+  WB_RESET(v1);
+  WB_RESET(u2);
+  WB_RESET(v2);
+  WB_RESET(w);
+  WB_RESET(x);
+  WB_RESET(y);
+  WB_RESET(z);
+  init_array (n, &alpha, &beta,
+	      POLYBENCH_ARRAY(A),
+	      POLYBENCH_ARRAY(u1),
+	      POLYBENCH_ARRAY(v1),
+	      POLYBENCH_ARRAY(u2),
+	      POLYBENCH_ARRAY(v2),
+	      POLYBENCH_ARRAY(w),
+	      POLYBENCH_ARRAY(x),
+	      POLYBENCH_ARRAY(y),
+	      POLYBENCH_ARRAY(z));
+  wb_output_count = 1;
+  WB_OUTPUT_1D(0, w, n);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_gemver (n, alpha, beta,
+		 POLYBENCH_ARRAY(A),
+		 POLYBENCH_ARRAY(u1),
+		 POLYBENCH_ARRAY(v1),
+		 POLYBENCH_ARRAY(u2),
+		 POLYBENCH_ARRAY(v2),
+		 POLYBENCH_ARRAY(w),
+		 POLYBENCH_ARRAY(x),
+		 POLYBENCH_ARRAY(y),
+		 POLYBENCH_ARRAY(z));
+}
+
+int bench_param_count(void)
+{
+  return 1;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n};
+  wb_require(index >= 0 && index < 1);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(A);
+  WB_FREE(u1);
+  WB_FREE(v1);
+  WB_FREE(u2);
+  WB_FREE(v2);
+  WB_FREE(w);
+  WB_FREE(x);
+  WB_FREE(y);
+  WB_FREE(z);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -184,3 +275,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

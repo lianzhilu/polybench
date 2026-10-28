@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "doitgen.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -41,6 +45,7 @@ void init_array(int nr, int nq, int np,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int nr, int nq, int np,
 		 DATA_TYPE POLYBENCH_3D(A,NR,NQ,NP,nr,nq,np))
@@ -58,6 +63,7 @@ void print_array(int nr, int nq, int np,
   POLYBENCH_DUMP_END("A");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -85,6 +91,60 @@ void kernel_doitgen(int nr, int nq, int np,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int nr = NR;
+static int nq = NQ;
+static int np = NP;
+WB_DECLARE_3D(DATA_TYPE, A, NR, NQ, NP);
+WB_DECLARE_1D(DATA_TYPE, sum, NP);
+WB_DECLARE_2D(DATA_TYPE, C4, NP, NP);
+
+void bench_init(void)
+{
+  WB_RESET(A);
+  WB_RESET(sum);
+  WB_RESET(C4);
+  init_array (nr, nq, np,
+	      POLYBENCH_ARRAY(A),
+	      POLYBENCH_ARRAY(C4));
+  wb_output_count = 1;
+  WB_OUTPUT_3D(0, A, nr, nq, np);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_doitgen (nr, nq, np,
+		  POLYBENCH_ARRAY(A),
+		  POLYBENCH_ARRAY(C4),
+		  POLYBENCH_ARRAY(sum));
+}
+
+int bench_param_count(void)
+{
+  return 3;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {nr, nq, np};
+  wb_require(index >= 0 && index < 3);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(A);
+  WB_FREE(sum);
+  WB_FREE(C4);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -126,3 +186,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

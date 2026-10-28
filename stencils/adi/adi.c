@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "adi.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -38,6 +42,7 @@ void init_array (int n,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int n,
 		 DATA_TYPE POLYBENCH_2D(u,N,N,n,n))
@@ -55,6 +60,7 @@ void print_array(int n,
   POLYBENCH_DUMP_END("u");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -128,6 +134,57 @@ void kernel_adi(int tsteps, int n,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+static int tsteps = TSTEPS;
+WB_DECLARE_2D(DATA_TYPE, u, N, N);
+WB_DECLARE_2D(DATA_TYPE, v, N, N);
+WB_DECLARE_2D(DATA_TYPE, p, N, N);
+WB_DECLARE_2D(DATA_TYPE, q, N, N);
+
+void bench_init(void)
+{
+  WB_RESET(u);
+  WB_RESET(v);
+  WB_RESET(p);
+  WB_RESET(q);
+  init_array (n, POLYBENCH_ARRAY(u));
+  wb_output_count = 1;
+  WB_OUTPUT_2D(0, u, n, n, WB_FULL);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_adi (tsteps, n, POLYBENCH_ARRAY(u), POLYBENCH_ARRAY(v), POLYBENCH_ARRAY(p), POLYBENCH_ARRAY(q));
+}
+
+int bench_param_count(void)
+{
+  return 2;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n, tsteps};
+  wb_require(index >= 0 && index < 2);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(u);
+  WB_FREE(v);
+  WB_FREE(p);
+  WB_FREE(q);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -166,3 +223,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "mvt.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -46,6 +50,7 @@ void init_array(int n,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int n,
 		 DATA_TYPE POLYBENCH_1D(x1,N,n),
@@ -70,6 +75,7 @@ void print_array(int n,
   POLYBENCH_DUMP_END("x2");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -96,6 +102,70 @@ void kernel_mvt(int n,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int n = N;
+WB_DECLARE_2D(DATA_TYPE, A, N, N);
+WB_DECLARE_1D(DATA_TYPE, x1, N);
+WB_DECLARE_1D(DATA_TYPE, x2, N);
+WB_DECLARE_1D(DATA_TYPE, y_1, N);
+WB_DECLARE_1D(DATA_TYPE, y_2, N);
+
+void bench_init(void)
+{
+  WB_RESET(A);
+  WB_RESET(x1);
+  WB_RESET(x2);
+  WB_RESET(y_1);
+  WB_RESET(y_2);
+  init_array (n,
+	      POLYBENCH_ARRAY(x1),
+	      POLYBENCH_ARRAY(x2),
+	      POLYBENCH_ARRAY(y_1),
+	      POLYBENCH_ARRAY(y_2),
+	      POLYBENCH_ARRAY(A));
+  wb_output_count = 2;
+  WB_OUTPUT_1D(0, x1, n);
+  WB_OUTPUT_1D(1, x2, n);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_mvt (n,
+	      POLYBENCH_ARRAY(x1),
+	      POLYBENCH_ARRAY(x2),
+	      POLYBENCH_ARRAY(y_1),
+	      POLYBENCH_ARRAY(y_2),
+	      POLYBENCH_ARRAY(A));
+}
+
+int bench_param_count(void)
+{
+  return 1;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {n};
+  wb_require(index >= 0 && index < 1);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(A);
+  WB_FREE(x1);
+  WB_FREE(x2);
+  WB_FREE(y_1);
+  WB_FREE(y_2);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -145,3 +215,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */

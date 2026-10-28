@@ -20,6 +20,10 @@
 /* Include benchmark-specific header. */
 #include "3mm.h"
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+#include <wasm_bench.h>
+#endif
+
 
 /* Array initialization. */
 static
@@ -48,6 +52,7 @@ void init_array(int ni, int nj, int nk, int nl, int nm,
 
 /* DCE code. Must scan the entire live-out data.
    Can be used also to check the correctness of the output. */
+#ifndef POLYBENCH_REMAIN_KERNEL
 static
 void print_array(int ni, int nl,
 		 DATA_TYPE POLYBENCH_2D(G,NI,NL,ni,nl))
@@ -64,6 +69,7 @@ void print_array(int ni, int nl,
   POLYBENCH_DUMP_END("G");
   POLYBENCH_DUMP_FINISH;
 }
+#endif
 
 
 /* Main computational kernel. The whole function will be timed,
@@ -110,6 +116,80 @@ void kernel_3mm(int ni, int nj, int nk, int nl, int nm,
 }
 
 
+#ifdef POLYBENCH_REMAIN_KERNEL
+
+/* Host-owned lifecycle; original initialization and kernel are unchanged. */
+static int ni = NI;
+static int nj = NJ;
+static int nk = NK;
+static int nl = NL;
+static int nm = NM;
+WB_DECLARE_2D(DATA_TYPE, E, NI, NJ);
+WB_DECLARE_2D(DATA_TYPE, A, NI, NK);
+WB_DECLARE_2D(DATA_TYPE, B, NK, NJ);
+WB_DECLARE_2D(DATA_TYPE, F, NJ, NL);
+WB_DECLARE_2D(DATA_TYPE, C, NJ, NM);
+WB_DECLARE_2D(DATA_TYPE, D, NM, NL);
+WB_DECLARE_2D(DATA_TYPE, G, NI, NL);
+
+void bench_init(void)
+{
+  WB_RESET(E);
+  WB_RESET(A);
+  WB_RESET(B);
+  WB_RESET(F);
+  WB_RESET(C);
+  WB_RESET(D);
+  WB_RESET(G);
+  init_array (ni, nj, nk, nl, nm,
+	      POLYBENCH_ARRAY(A),
+	      POLYBENCH_ARRAY(B),
+	      POLYBENCH_ARRAY(C),
+	      POLYBENCH_ARRAY(D));
+  wb_output_count = 1;
+  WB_OUTPUT_2D(0, G, ni, nl, WB_FULL);
+  wb_ready = 1;
+}
+
+void bench_run(void)
+{
+  wb_require(wb_ready);
+  kernel_3mm (ni, nj, nk, nl, nm,
+	      POLYBENCH_ARRAY(E),
+	      POLYBENCH_ARRAY(A),
+	      POLYBENCH_ARRAY(B),
+	      POLYBENCH_ARRAY(F),
+	      POLYBENCH_ARRAY(C),
+	      POLYBENCH_ARRAY(D),
+	      POLYBENCH_ARRAY(G));
+}
+
+int bench_param_count(void)
+{
+  return 5;
+}
+
+int bench_param(int index)
+{
+  const int params[] = {ni, nj, nk, nl, nm};
+  wb_require(index >= 0 && index < 5);
+  return params[index];
+}
+
+void bench_free(void)
+{
+  WB_FREE(E);
+  WB_FREE(A);
+  WB_FREE(B);
+  WB_FREE(F);
+  WB_FREE(C);
+  WB_FREE(D);
+  WB_FREE(G);
+  wb_ready = 0;
+  wb_output_count = 0;
+}
+
+#else
 int main(int argc, char** argv)
 {
   /* Retrieve problem size. */
@@ -167,3 +247,5 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+#endif /* POLYBENCH_REMAIN_KERNEL */
