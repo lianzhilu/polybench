@@ -3,7 +3,7 @@
 ## 改动
 
 `gemm.c` 新增可选的 `GEMM_REMAIN_KERNEL` 模式，原来的 `init_array` 和
-`kernel_gemm` 函数体保持不变。不定义这个宏时，仍然编译原来的 PolyBench 命令行程序。
+`kernel_gemm` 函数体保持不变。也支持公共的 `POLYBENCH_REMAIN_KERNEL` 开关；两个开关均未定义时，仍编译原来的 PolyBench 命令行程序。
 
 定义这个宏后，不再编译原来的 `main(argc, argv)` 和 `print_array`，也不使用
 PolyBench 的内部计时、缓存冲刷和标准输出。模块改为由宿主调用的 reactor：
@@ -50,7 +50,7 @@ for bits in 32 64; do
     -sABORTING_MALLOC=0 \
     -sASSERTIONS=0 \
     -sFILESYSTEM=0 \
-    '-sEXPORTED_FUNCTIONS=["_gemm_init","_gemm_run","_gemm_checksum","_gemm_c_offset","_gemm_ni","_gemm_nj","_gemm_nk","_gemm_row_stride","_gemm_pointer_bits","_gemm_free"]' \
+    '-sEXPORTED_FUNCTIONS=["_bench_init","_bench_run","_bench_checksum","_bench_free","_bench_abi_version","_bench_pointer_bits","_bench_output_count","_bench_output_type","_bench_output_rank","_bench_output_region","_bench_output_dim","_bench_output_stride","_bench_output_offset","_bench_param_count","_bench_param","_gemm_init","_gemm_run","_gemm_checksum","_gemm_c_offset","_gemm_ni","_gemm_nj","_gemm_nk","_gemm_row_stride","_gemm_pointer_bits","_gemm_free"]' \
     -o build/gemm-remain-kernel-wasm${bits}.wasm
 done
 ```
@@ -70,7 +70,32 @@ wasmtime run -W memory64=y --invoke gemm_pointer_bits build/gemm-remain-kernel-w
 不会执行原来的完整基准。也不要在不同 CLI 进程中分别调用 init 和 run：
 不同进程创建不同实例，数组状态不会保留。
 
-## 运行、验证和计时
+## 公共运行脚本（包含在 `--benchmark all` 中）
+
+GEMM 新增公共 ABI v1 的 `bench_*` 别名，复用原来的初始化、计算、checksum 和释放逻辑。
+上面的编译命令同时导出 `bench_*` 和 `gemm_*`，既可使用公共脚本，也可使用原独立脚本。
+旧的 Wasm 若只导出了 `gemm_*`，需重新编译后再使用公共脚本。
+
+构建与上述 MEDIUM/double 配置一致的原生参考：
+
+```bash
+cc -std=c11 -D_POSIX_C_SOURCE=200112L -O3 -ffp-contract=off \
+  -DMEDIUM_DATASET -DDATA_TYPE_IS_DOUBLE -DGEMM_REMAIN_KERNEL \
+  -Iutilities -Ilinear-algebra/blas/gemm -shared -fPIC \
+  linear-algebra/blas/gemm/gemm.c -lm -o build/libgemm-remain-kernel.so
+```
+
+在已安装 `wasmtime==50.0.1` 的 Python 环境中运行：
+
+```bash
+python utilities/run_wasmtime.py --benchmark gemm \
+  --build-dir build --native-dir build --json build/gemm-results.json
+```
+
+使用公共批量编译命令准备好其他程序后，`--benchmark all` 会运行包括 GEMM 的全部 30 项。
+完整批量命令和公共接口说明见 [公共实验说明](../../../utilities/wasmtime_readme.md)。
+
+## GEMM 独立运行脚本
 
 使用 Python 的 Wasmtime 嵌入 API，在**同一个实例**上依次调用初始化、计算和校验。
 Python 包内置自己的 Wasmtime 引擎，不调用系统中的 `wasmtime` CLI；

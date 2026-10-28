@@ -20,6 +20,11 @@
 /* Include benchmark-specific header. */
 #include "gemm.h"
 
+/* Accept the suite-wide mode while retaining the original GEMM mode/exports. */
+#if defined(POLYBENCH_REMAIN_KERNEL) && !defined(GEMM_REMAIN_KERNEL)
+#define GEMM_REMAIN_KERNEL
+#endif
+
 #ifdef GEMM_REMAIN_KERNEL
 #include <stdint.h>
 #endif
@@ -172,6 +177,59 @@ void gemm_free(void)
   gemm_c = NULL;
   gemm_a = NULL;
   gemm_b = NULL;
+}
+
+/* Common ABI v1 aliases. Existing gemm_* callers continue to work. */
+static void gemm_require_output(int index)
+{
+  if (index != 0 || gemm_c == NULL)
+    __builtin_trap();
+}
+
+void bench_init(void) { gemm_init(); }
+void bench_run(void) { gemm_run(); }
+void bench_free(void) { gemm_free(); }
+int bench_abi_version(void) { return 1; }
+int bench_pointer_bits(void) { return gemm_pointer_bits(); }
+int bench_param_count(void) { return 3; }
+int bench_param(int index)
+{
+  const int params[] = {NI, NJ, NK};
+  if (index < 0 || index >= 3)
+    __builtin_trap();
+  return params[index];
+}
+int bench_output_count(void) { gemm_require_output(0); return 1; }
+int bench_output_type(int index)
+{
+  gemm_require_output(index);
+  return _Generic((DATA_TYPE)0, double: 1, float: 2, int: 3);
+}
+int bench_output_rank(int index) { gemm_require_output(index); return 2; }
+int bench_output_region(int index) { gemm_require_output(index); return 0; }
+int bench_output_dim(int index, int axis)
+{
+  gemm_require_output(index);
+  if (axis < 0 || axis >= 2)
+    __builtin_trap();
+  return axis == 0 ? NI : NJ;
+}
+uint64_t bench_output_stride(int index, int axis)
+{
+  gemm_require_output(index);
+  if (axis < 0 || axis >= 2)
+    __builtin_trap();
+  return axis == 0 ? sizeof(*gemm_c) : sizeof(DATA_TYPE);
+}
+uint64_t bench_output_offset(int index)
+{
+  gemm_require_output(index);
+  return gemm_c_offset();
+}
+double bench_checksum(int index)
+{
+  gemm_require_output(index);
+  return gemm_checksum();
 }
 
 #else

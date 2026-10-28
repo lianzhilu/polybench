@@ -314,7 +314,7 @@ def discover():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", nargs="+", required=True,
-                        help="one or more names, or 'all' (the 29 common-ABI benchmarks)")
+                        help="one or more names, or 'all' (all 30 benchmarks, including GEMM)")
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build")
     parser.add_argument("--native-dir", type=Path,
                         help="require a native reference .so for every requested benchmark")

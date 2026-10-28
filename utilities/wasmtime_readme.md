@@ -2,12 +2,12 @@
 
 ## 范围
 
-29 项基准支持 `POLYBENCH_REMAIN_KERNEL`，逐项编译命令见各目录的 `readme.md`。
-GEMM 保留既有的 `GEMM_REMAIN_KERNEL`、`gemm_*` 接口和独立运行脚本，不在公共脚本的 `all` 中。
+30 项基准支持 `POLYBENCH_REMAIN_KERNEL`，逐项编译命令见各目录的 `readme.md`。
+GEMM 同时提供公共 `bench_*` 接口，并保留既有的 `GEMM_REMAIN_KERNEL`、`gemm_*` 接口和独立脚本。
 `medley/nussinov/Nussinov.orig.c` 是历史参考文件，不作为另一项基准。
 
 原初始化公式、计算内核、默认数据类型和原 `main` 保留。默认 `deriche` 为 float32，
-`floyd-warshall` 和 `nussinov` 为 int32，其余 26 项为 float64，不统一改为 double。
+`floyd-warshall` 和 `nussinov` 为 int32，其余 27 项为 float64，不统一改为 double。
 新模式只编译基准 `.c`，不要链接 `utilities/polybench.c` 或定义 `POLYBENCH_TIME`。
 不定义新宏时仍按原方式编译运行，链接 `utilities/polybench.c`。
 
@@ -19,14 +19,20 @@ GEMM 保留既有的 `GEMM_REMAIN_KERNEL`、`gemm_*` 接口和独立运行脚本
 ```bash
 mkdir -p build
 dataset=MEDIUM
+common_exports='["_bench_init","_bench_run","_bench_checksum","_bench_free","_bench_abi_version","_bench_pointer_bits","_bench_output_count","_bench_output_type","_bench_output_rank","_bench_output_region","_bench_output_dim","_bench_output_stride","_bench_output_offset","_bench_param_count","_bench_param"]'
 for source in datamining/*/*.c linear-algebra/blas/*/*.c \
               linear-algebra/kernels/*/*.c linear-algebra/solvers/*/*.c \
               medley/*/*.c stencils/*/*.c; do
   case "$source" in
-    */gemm/gemm.c|*/Nussinov.orig.c) continue ;;
+    */Nussinov.orig.c) continue ;;
   esac
   name=$(basename "$source" .c)
   directory=$(dirname "$source")
+  exports=$common_exports
+  if [ "$name" = gemm ]; then
+    # 同时保留 gemm_* 导出，兼容独立的 GEMM 运行脚本。
+    exports='["_bench_init","_bench_run","_bench_checksum","_bench_free","_bench_abi_version","_bench_pointer_bits","_bench_output_count","_bench_output_type","_bench_output_rank","_bench_output_region","_bench_output_dim","_bench_output_stride","_bench_output_offset","_bench_param_count","_bench_param","_gemm_init","_gemm_run","_gemm_checksum","_gemm_c_offset","_gemm_ni","_gemm_nj","_gemm_nk","_gemm_row_stride","_gemm_pointer_bits","_gemm_free"]'
+  fi
   for bits in 32 64; do
     emcc -m${bits} -O3 -ffp-contract=off \
       -D${dataset}_DATASET -DPOLYBENCH_REMAIN_KERNEL \
@@ -34,7 +40,7 @@ for source in datamining/*/*.c linear-algebra/blas/*/*.c \
       --no-entry -sSTANDALONE_WASM=1 \
       -sINITIAL_MEMORY=536870912 -sALLOW_MEMORY_GROWTH=0 \
       -sABORTING_MALLOC=0 -sASSERTIONS=0 -sFILESYSTEM=0 \
-      '-sEXPORTED_FUNCTIONS=["_bench_init","_bench_run","_bench_checksum","_bench_free","_bench_abi_version","_bench_pointer_bits","_bench_output_count","_bench_output_type","_bench_output_rank","_bench_output_region","_bench_output_dim","_bench_output_stride","_bench_output_offset","_bench_param_count","_bench_param"]' \
+      "-sEXPORTED_FUNCTIONS=$exports" \
       -o "build/${name}-remain-kernel-wasm${bits}.wasm" || break 2
   done
   cc -std=c11 -D_POSIX_C_SOURCE=200112L -O3 -ffp-contract=off \
@@ -58,10 +64,13 @@ python -m pip install wasmtime==50.0.1
 python utilities/run_wasmtime.py --benchmark bicg \
   --build-dir build --native-dir build --json build/bicg-results.json
 
-# 全部 29 项，每种位宽默认预热 5 次、采样 31 次。
+# 全部 30 项（包括 GEMM），每种位宽默认预热 5 次、采样 31 次。
 python utilities/run_wasmtime.py --benchmark all \
   --build-dir build --native-dir build --json build/all-results.json
 ```
+
+首次升级到包含 GEMM 的 `all` 时，需要按上述命令重新编译 GEMM 的两个 Wasm 文件和原生库；
+旧 Wasm 如果只导出 `gemm_*`，无法直接供公共脚本调用。
 
 Python 包内置自己的 Wasmtime 引擎，不调用系统的 CLI。脚本要求模块零导入，不伪造 WASI 接口。
 `--native-dir` 要求每项原生库存在，缺失时失败；省略它时明确标记为 cross-mode only。
@@ -89,7 +98,7 @@ Python 包内置自己的 Wasmtime 引擎，不调用系统的 CLI。脚本要�
 | --- | --- |
 | `bench_abi_version()` | int，当前为 1 |
 | `bench_pointer_bits()` | int，Wasm 分别为 32/64 |
-| `bench_init()` | 首次分配，每次清零所有数组并执行原初始化 |
+| `bench_init()` | 首次分配，每次恢复输入；通用适配层同时清零工作数组 |
 | `bench_run()` | 原计算内核，未初始化时 trap |
 | `bench_free()` | 释放并清空指针，重复调用安全，之后可重新初始化 |
 | `bench_param_count()` / `bench_param(index)` | 有序问题参数，包括适用的时间步数 |
@@ -122,7 +131,7 @@ int32 精确比较；默认 float32 使用 rtol=1e-4/atol=1e-5，float64 使用 
 输入初始化、预热、原生参考、校验和输出不计入。极小数据集可能由调用开销主导。
 MINI/SMALL 用于校验和回归，MEDIUM 用于完整校验及每种位宽 31 次采样。
 
-默认采用“重置所有数组、不显式冲刷缓存”。初始化会预先访问数据，不保证工作集完全驻留缓存，
+默认采用“恢复输入、不显式冲刷缓存”。初始化会预先访问数据，不保证工作集完全驻留缓存，
 也不等同于原 PolyBench 默认缓存冲刷模式。两种位宽统一启用 memory64、Cranelift、speed 优化，
 固定内存为 512 MiB。更大数据集要先核算所有数组和局部栈预算。
 
@@ -130,7 +139,7 @@ MINI/SMALL 用于校验和回归，MEDIUM 用于完整校验及每种位宽 31 �
 跨程序应逐项报告；若给总指标，需说明几何平均和异常项处理，不将毫秒跨程序直接算术平均。
 推荐固定 CPU、多次独立启动，并记录硬件、系统、编译器和运行时版本。
 
-## 本次验证记录
+## 首批 29 项验证记录
 
 2026-10-28，在 macOS arm64、Emscripten 6.0.10、Python Wasmtime 50.0.1、Apple Clang 16 环境中：
 
@@ -139,6 +148,13 @@ MINI/SMALL 用于校验和回归，MEDIUM 用于完整校验及每种位宽 31 �
 - MINI/SMALL 各预热 1 次、采样 5 次；MEDIUM 各预热 5 次、每种位宽采样 31 次。
 - 29 项旧模式的原生程序和 wasm32 程序均编译运行成功，按原打印精度与适配结果核对。
 - bicg、doitgen、cholesky、deriche 额外使用 padding=3，验证多输出、三维、三角和 float32 读取。
-- 原 `init_array` 和计算内核逐函数文本对照未改变；既有 GEMM 文件未修改。
+- 当时的原 `init_array` 和计算内核逐函数文本对照未改变；当时 GEMM 文件未修改。
 
 这些检查用于验证改造和运行链路，性能结论仍需在目标机器上单独测量。
+
+## GEMM 加入 all 后的验证
+
+同一环境下，按本页批量编译命令构建了全部 30 项的 MEDIUM wasm32、wasm64 和原生参考库。
+公共 `--benchmark all` 的 30 项均通过完整结果及原生参考校验，每种位宽完成 31 次采样。
+原 GEMM 独立脚本也通过全部 44,000 个结果元素的 Python 参考校验和 31 次采样。
+原 GEMM 初始化、计算内核和既有生命周期函数体未改变。
